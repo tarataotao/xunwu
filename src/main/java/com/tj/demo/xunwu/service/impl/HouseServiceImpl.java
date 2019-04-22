@@ -17,10 +17,7 @@ import com.tj.demo.xunwu.form.HouseForm;
 import com.tj.demo.xunwu.form.PhotoForm;
 import com.tj.demo.xunwu.form.RentSearch;
 import com.tj.demo.xunwu.repository.*;
-import com.tj.demo.xunwu.service.IHouseService;
-import com.tj.demo.xunwu.service.IQiNiuService;
-import com.tj.demo.xunwu.service.ServiceMultResult;
-import com.tj.demo.xunwu.service.ServiceResult;
+import com.tj.demo.xunwu.service.*;
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -59,8 +56,8 @@ public class HouseServiceImpl implements IHouseService {
     private IQiNiuService qiNiuService;
     @Autowired
     private HouseSubscribeRespository subscribeRespository;
-
-
+    @Autowired
+    private ISearchService searchService;
 
     @Override
     @Transactional
@@ -188,6 +185,10 @@ predicate=cb.and(predicate,cb.notEqual(root.get("status"), HouseStatus.DELETED.g
         modelMapper.map(houseForm,house);
         house.setLastUpdateTime(new Date());
         houseRepository.save(house);
+        //只有当房屋的状态是已经审核的状态的时候，才可以
+        if(house.getStatus()==HouseStatus.PASSES.getValue()){
+            searchService.index(Long.valueOf(house.getId()));
+        }
         return ServiceResult.success();
     }
 
@@ -257,7 +258,15 @@ predicate=cb.and(predicate,cb.notEqual(root.get("status"), HouseStatus.DELETED.g
         if(house.getStatus() ==HouseStatus.DELETED.getValue()){
             return new ServiceResult(false,"已删除的资源不允许操作");
         }
-        houseRepository.updateStatus(id,status);
+
+        houseRepository.updateStatus(Integer.parseInt(id+""),status);
+        //只有在上架时候更新索引，其他情况都要删除索引
+        if(status==HouseStatus.PASSES.getValue()){
+            searchService.index(Long.valueOf(id));
+        }else{
+            searchService.remove(Long.valueOf(id));
+        }
+
         return ServiceResult.success();
     }
 
