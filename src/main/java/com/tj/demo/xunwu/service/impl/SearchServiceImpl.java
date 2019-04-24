@@ -2,14 +2,20 @@ package com.tj.demo.xunwu.service.impl;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.tj.demo.xunwu.base.HouseSort;
+import com.tj.demo.xunwu.base.RentValueBlock;
 import com.tj.demo.xunwu.entity.House;
 import com.tj.demo.xunwu.entity.HouseDetail;
 import com.tj.demo.xunwu.entity.HouseTag;
+import com.tj.demo.xunwu.form.RentSearch;
 import com.tj.demo.xunwu.repository.HouseDetailRepository;
 import com.tj.demo.xunwu.repository.HouseRepository;
 import com.tj.demo.xunwu.repository.HouseTagRepository;
 import com.tj.demo.xunwu.service.ISearchService;
+import com.tj.demo.xunwu.service.ServiceMultResult;
+import com.tj.demo.xunwu.service.ServiceResult;
 import com.tj.demo.xunwu.service.search.HouseIndexKey;
+import com.tj.demo.xunwu.service.search.HouseIndexMessage;
 import com.tj.demo.xunwu.service.search.HouseIndexTemplate;
 import lombok.extern.slf4j.Slf4j;
 import org.elasticsearch.action.index.IndexResponse;
@@ -18,16 +24,22 @@ import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.update.UpdateResponse;
 import org.elasticsearch.client.transport.TransportClient;
 import org.elasticsearch.common.xcontent.XContentType;
-import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.index.query.RangeQueryBuilder;
 import org.elasticsearch.index.reindex.BulkByScrollResponse;
 import org.elasticsearch.index.reindex.DeleteByQueryAction;
 import org.elasticsearch.index.reindex.DeleteByQueryRequestBuilder;
 import org.elasticsearch.rest.RestStatus;
+import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.sort.SortOrder;
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -39,6 +51,8 @@ public class SearchServiceImpl  implements ISearchService{
     private static final String  INDEX_NAME="xunwu";
 
     private static final String INDEX_TYPE="house";
+
+    private static final String INDEX_TOPIC="house_build";
 
     @Autowired
     private HouseRepository houseRepository;
@@ -55,24 +69,72 @@ public class SearchServiceImpl  implements ISearchService{
     @Autowired
     private HouseTagRepository houseTagRepository;
 
+    @Autowired
+    private KafkaTemplate kafkaTemplate;
 
-    @Override
-    public boolean index(Long houseId) {
+    @KafkaListener(topics = INDEX_TOPIC )
+    private void handleMessage(String content){
+        try {
+            HouseIndexMessage message=objectMapper.readValue(content, HouseIndexMessage.class);
+            switch (message.getOperation()){
+                case HouseIndexMessage.INDEX:
+                    this.createOrUpdateIndex(message);
+                    break;
+                case HouseIndexMessage.REMOVE:
+                    this.removeIndex(message);
+                    break;
+                    default:
+                        log.warn("Not support message content :"+content);
+                        break;
+            }
+        } catch (IOException e) {
+            log.error(" Cannot parse json for "+content,e);
+        }
+    }
+
+    private void removeIndex(HouseIndexMessage message) {
+        Long houseId=message.getHouseId();
+        DeleteByQueryRequestBuilder builder=DeleteByQueryAction.INSTANCE
+                .newRequestBuilder(esClient)
+                .filter(QueryBuilders.termQuery(HouseIndexKey.HOUSE_ID,houseId))
+                .source(INDEX_NAME);
+        log.debug(" Delete by query for house: "+houseId);
+
+        BulkByScrollResponse response=builder.get();
+        long deleted=response.getDeleted();
+        log.debug(" Delete total :"+deleted);
+        if(deleted<=0){
+            this.remove(houseId,message.getRetry()+1);
+        }
+    }
+
+    private void createOrUpdateIndex(HouseIndexMessage message){
+        Long houseId=message.getHouseId();
         Optional<House> houseOptional
                 =houseRepository.findById(Integer.valueOf(houseId+""));
         House house=houseOptional.get();
         if(house==null){
+            //如果失败的花，消息将重入队列
             log.error("index house {} does not exist!",houseId);
+            this.index(houseId,message.getRetry()+1);
+            return ;
         }
 
         HouseIndexTemplate indexTemplate=new HouseIndexTemplate();
         HouseDetail detail=houseDetailRepository.findByHouseId(Integer.valueOf(houseId+""));
         if(detail==null){
             //TODO 异常情况
-            return false;
         }
         modelMapper.map(detail,indexTemplate);
-
+        indexTemplate.setCityEnName(house.getCityEnName());
+        indexTemplate.setArea(house.getArea());
+        indexTemplate.setTitle(house.getTitle());
+        indexTemplate.setPrice(house.getPrice());
+        indexTemplate.setCreateTime(house.getCreateTime());
+        indexTemplate.setLastUpdateTime(house.getLastUpdateTime());
+        indexTemplate.setRegionEnName(house.getRegionEnName());
+        indexTemplate.setStreet(house.getStreet());
+        indexTemplate.setDistrict(house.getDistrict());
         List<HouseTag> tags=houseTagRepository.findAllByHouseId(Integer.valueOf(houseId+""));
         if(tags!=null && !tags.isEmpty()){
             List<String> tagStrings=new ArrayList<>();
@@ -97,7 +159,24 @@ public class SearchServiceImpl  implements ISearchService{
         if(success){
             log.debug("Index success with house "+houseId);
         }
-        return success;
+    }
+
+    @Override
+    public void index(Long houseId) {
+        this.index(houseId,0);
+    }
+
+    public void index(Long houseId,int retry){
+        if(retry>HouseIndexMessage.MAX_RETRY){
+            log.error("Retry index times over 3 for house:"+houseId+" Please check it");
+            return;
+        }
+        HouseIndexMessage message=new HouseIndexMessage(houseId,HouseIndexMessage.INDEX,retry);
+        try {
+            kafkaTemplate.send(INDEX_TOPIC,objectMapper.writeValueAsString(message));
+        } catch (JsonProcessingException e) {
+           log.error("Json encode error for "+message);
+        }
     }
 
     private boolean create(HouseIndexTemplate indexTemplate) {
@@ -148,16 +227,97 @@ public class SearchServiceImpl  implements ISearchService{
     }
 
     @Override
-    public boolean remove(Long houseId) {
-        DeleteByQueryRequestBuilder builder=DeleteByQueryAction.INSTANCE
-                .newRequestBuilder(esClient)
-                .filter(QueryBuilders.termQuery(HouseIndexKey.HOUSE_ID,houseId))
-                .source(INDEX_NAME);
-        log.debug(" Delete by query for house: "+houseId);
+    public void remove(Long houseId) {
+        this.remove(houseId,0);
+    }
 
-        BulkByScrollResponse response=builder.get();
-        long deleted=response.getDeleted();
-        log.debug(" Delete total :"+deleted);
-        return true;
+    @Override
+    public ServiceMultResult<Integer> query(RentSearch rentSearch) {
+        BoolQueryBuilder boolQueryBuilder=QueryBuilders.boolQuery();
+        boolQueryBuilder.filter(QueryBuilders.termQuery(HouseIndexKey.CITY_EN_NAME,rentSearch.getCityEnName()));
+        if(rentSearch.getRegionEnName() !=null && !"*".equals(rentSearch.getRegionEnName())){
+            boolQueryBuilder.filter(QueryBuilders.termQuery(HouseIndexKey.REGION_EN_NAME,rentSearch.getRegionEnName()));
+        }
+        //面积
+        RentValueBlock area=RentValueBlock.matchArea(rentSearch.getAreaBlock());
+        if(!RentValueBlock.ALL.equals(area)){
+           RangeQueryBuilder rangeQueryBuilder= QueryBuilders.rangeQuery(HouseIndexKey.AREA);
+            if(area.getMax()>0){
+                rangeQueryBuilder.lte(area.getMax());
+            }
+            if(area.getMin()>0){
+                rangeQueryBuilder.gte(area.getMin());
+            }
+            boolQueryBuilder.filter(rangeQueryBuilder);
+        }
+
+        //价格
+        RentValueBlock price=RentValueBlock.matchPrice(rentSearch.getPriceBlock());
+        if(!RentValueBlock.ALL.equals(price)){
+            RangeQueryBuilder priceRangeQueryBuilder= QueryBuilders.rangeQuery(HouseIndexKey.PRICE);
+            if(price.getMax()>0){
+                priceRangeQueryBuilder.lte(price.getMax());
+            }
+            if(price.getMin()>0){
+                priceRangeQueryBuilder.gte(price.getMin());
+            }
+            boolQueryBuilder.filter(priceRangeQueryBuilder);
+        }
+
+        //方向
+        if(rentSearch.getDirection() >0 ){
+            boolQueryBuilder.filter(QueryBuilders.termQuery(HouseIndexKey.DIRECTION,rentSearch.getDirection()));
+        }
+        //租住方式
+        if(rentSearch.getRentWay()>-1){
+            boolQueryBuilder.filter(QueryBuilders.termQuery(HouseIndexKey.RENT_WAY,rentSearch.getRentWay()));
+        }
+
+        /**
+         * 关键词的复合查询
+         */
+        boolQueryBuilder.must(QueryBuilders.multiMatchQuery(rentSearch.getKeywords(),
+                HouseIndexKey.TITLE,
+                HouseIndexKey.TRAFFIC,
+                HouseIndexKey.DISTRICT,
+                HouseIndexKey.ROUND_SERVICE,
+                HouseIndexKey.SUBWAY_LINE_NAME,
+                HouseIndexKey.SUBWAY_STATION_NAME
+                ));
+
+        SearchRequestBuilder requestBuilder= this.esClient.prepareSearch(INDEX_NAME).setTypes(INDEX_TYPE)
+                .setQuery(boolQueryBuilder)
+                .addSort(HouseSort.getSortKey(rentSearch.getOrderBy()), SortOrder.fromString(rentSearch.getOrderDirection()))
+                .setFrom(rentSearch.getStart())
+                .setSize(rentSearch.getSize());
+        log.debug(requestBuilder.toString());
+        List<Integer> houseIds=new ArrayList<>();
+        SearchResponse response=requestBuilder.get();
+        if(response.status()!=RestStatus.OK){
+            log.warn("Search status is no ok for "+requestBuilder);
+            return new ServiceMultResult<>(0,houseIds);
+        }
+        for(SearchHit hit:response.getHits()){
+            houseIds.add((Integer) hit.getSourceAsMap().get(HouseIndexKey.HOUSE_ID));
+        }
+        return new ServiceMultResult<>(response.getHits().totalHits,houseIds);
+    }
+
+    @Override
+    public ServiceResult<List<String>> suggest(String prefix) {
+        return null;
+    }
+
+    private void remove(Long houseId,int retry){
+        if(retry>HouseIndexMessage.MAX_RETRY){
+            log.error("Retry remove times over 3 for house:"+houseId+" Please check it !");
+            return;
+        }
+        HouseIndexMessage message=new HouseIndexMessage(houseId,HouseIndexMessage.REMOVE,retry);
+        try {
+            kafkaTemplate.send(INDEX_TOPIC,objectMapper.writeValueAsString(message));
+        } catch (JsonProcessingException e) {
+           log.error("Cannot encode json for "+message,e);
+        }
     }
 }

@@ -29,6 +29,19 @@ public class HouseController {
     @Autowired
     private IUserService userService;
 
+    @GetMapping("rent/house/autocomplete")
+    @ResponseBody
+    public ApiResponse autoComplete(@RequestParam(value = "prefix") String prefix){
+        if(prefix.isEmpty()){
+            return ApiResponse.ofSuccess(ApiResponse.Status.BAD_REQUEST);
+        }
+        List<String> result=new ArrayList<>();
+        result.add("超棒瓦力");
+        result.add("很棒瓦力");
+        return ApiResponse.ofSuccess(result);
+    }
+
+
     /**
      * 获取支持城市列表
      * @return
@@ -63,7 +76,7 @@ public class HouseController {
      * @param cityEnName
      * @return
      */
-    @GetMapping("address/support/subway/line")
+    @GetMapping("address/spport/subway/line")
     @ResponseBody
     public ApiResponse getSupportSubwayLine(@RequestParam(name="city_name") String cityEnName){
         List<SubwayDto> subways=supportAddress.findAllSubwayByCity(cityEnName);
@@ -126,7 +139,7 @@ public class HouseController {
         model.addAttribute("areaBlocks",RentValueBlock.AREA_BLOCK);
 
         model.addAttribute("currentPriceBlock",RentValueBlock.matchPrice(rentSearch.getPriceBlock()));
-        model.addAttribute("currentAreaBlock",RentValueBlock.matchPrice(rentSearch.getAreaBlock()));
+        model.addAttribute("currentAreaBlock",RentValueBlock.matchArea(rentSearch.getAreaBlock()));
         return "rent-list";
 
     }

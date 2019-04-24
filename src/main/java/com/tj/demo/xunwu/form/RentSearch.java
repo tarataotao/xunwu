@@ -5,6 +5,7 @@ public class RentSearch {
     private String regionEnName;
     private String priceBlock;
     private String areaBlock;
+
     private int room;
     private int direction;
     private String keywords;

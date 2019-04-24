@@ -307,6 +307,20 @@ predicate=cb.and(predicate,cb.notEqual(root.get("status"), HouseStatus.DELETED.g
 
     @Override
     public ServiceMultResult<HouseDTO> query(RentSearch rentSearch) {
+        if(rentSearch.getKeywords()!=null && !rentSearch.getKeywords().isEmpty()){
+            ServiceMultResult<Integer> serviceMultResult=searchService.query(rentSearch);
+            if(serviceMultResult.getTotal()==0){
+                return new ServiceMultResult<>(0,new ArrayList<>());
+            }else{
+                return new ServiceMultResult<>(serviceMultResult.getTotal(),wrapperHouseResult(serviceMultResult.getResult()));
+
+            }
+        }
+
+        return simpleQuery(rentSearch);
+    }
+
+    private ServiceMultResult<HouseDTO> simpleQuery(RentSearch rentSearch){
         Sort sort= HouseSort.generateSort(rentSearch.getOrderBy(),rentSearch.getOrderDirection());
         int page=rentSearch.getStart()/rentSearch.getSize();
         Pageable pageable=new PageRequest(page,rentSearch.getSize(),sort);
@@ -335,6 +349,24 @@ predicate=cb.and(predicate,cb.notEqual(root.get("status"), HouseStatus.DELETED.g
 
         wrapperHouseList(houseIds,idToHouseMap);
         return new ServiceMultResult<>(houses.getTotalElements(),houseDTOS);
+    }
+
+    private List<HouseDTO> wrapperHouseResult(List<Integer> houseIds){
+        List<HouseDTO> result=new ArrayList<>();
+        Map<Integer,HouseDTO> idToHouseMap=new HashMap<>();
+        Iterable<House> houses=houseRepository.findAllById(houseIds);
+        houses.forEach(house -> {
+            HouseDTO houseDTO=modelMapper.map(house,HouseDTO.class);
+            houseDTO.setCover(this.cdnPrefix+house.getCover());
+            idToHouseMap.put(house.getId(),houseDTO);
+        });
+        wrapperHouseList(houseIds,idToHouseMap);
+        //矫正顺序
+        for (Integer houseId: houseIds
+             ) {
+            result.add(idToHouseMap.get(houseId));
+        }
+        return result;
     }
 
     /**
