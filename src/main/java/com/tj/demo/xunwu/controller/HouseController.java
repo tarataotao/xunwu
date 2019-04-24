@@ -29,16 +29,18 @@ public class HouseController {
     @Autowired
     private IUserService userService;
 
+    @Autowired
+    private ISearchService searchService;
+
+
     @GetMapping("rent/house/autocomplete")
     @ResponseBody
     public ApiResponse autoComplete(@RequestParam(value = "prefix") String prefix){
         if(prefix.isEmpty()){
             return ApiResponse.ofSuccess(ApiResponse.Status.BAD_REQUEST);
         }
-        List<String> result=new ArrayList<>();
-        result.add("超棒瓦力");
-        result.add("很棒瓦力");
-        return ApiResponse.ofSuccess(result);
+       ServiceResult<List<String>> result=this.searchService.suggest(prefix);
+        return ApiResponse.ofSuccess(result.getResult());
     }
 
 

@@ -2,6 +2,7 @@ package com.tj.demo.xunwu.service.impl;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.Lists;
 import com.tj.demo.xunwu.base.HouseSort;
 import com.tj.demo.xunwu.base.RentValueBlock;
 import com.tj.demo.xunwu.entity.House;
@@ -17,7 +18,11 @@ import com.tj.demo.xunwu.service.ServiceResult;
 import com.tj.demo.xunwu.service.search.HouseIndexKey;
 import com.tj.demo.xunwu.service.search.HouseIndexMessage;
 import com.tj.demo.xunwu.service.search.HouseIndexTemplate;
+import com.tj.demo.xunwu.service.search.HouseSuggest;
 import lombok.extern.slf4j.Slf4j;
+import org.elasticsearch.action.admin.indices.analyze.AnalyzeAction;
+import org.elasticsearch.action.admin.indices.analyze.AnalyzeRequestBuilder;
+import org.elasticsearch.action.admin.indices.analyze.AnalyzeResponse;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.action.search.SearchRequestBuilder;
 import org.elasticsearch.action.search.SearchResponse;
@@ -33,6 +38,11 @@ import org.elasticsearch.index.reindex.DeleteByQueryRequestBuilder;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.sort.SortOrder;
+import org.elasticsearch.search.suggest.Suggest;
+import org.elasticsearch.search.suggest.SuggestBuilder;
+import org.elasticsearch.search.suggest.SuggestBuilders;
+import org.elasticsearch.search.suggest.completion.CompletionSuggestion;
+import org.elasticsearch.search.suggest.completion.CompletionSuggestionBuilder;
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -40,9 +50,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 @Service
 @Slf4j
@@ -180,6 +188,11 @@ public class SearchServiceImpl  implements ISearchService{
     }
 
     private boolean create(HouseIndexTemplate indexTemplate) {
+
+        if(!updateSuggest(indexTemplate)){
+            return false;
+        }
+
         try {
             IndexResponse indexResponse=this.esClient.prepareIndex(INDEX_NAME,INDEX_TYPE)
                     .setSource(objectMapper.writeValueAsBytes(indexTemplate), XContentType.JSON).get();
@@ -196,6 +209,9 @@ public class SearchServiceImpl  implements ISearchService{
     }
 
     private boolean update(String esId,HouseIndexTemplate indexTemplate){
+        if(!updateSuggest(indexTemplate)){
+            return false;
+        };
         try {
             UpdateResponse indexResponse=this.esClient.prepareUpdate(INDEX_NAME,INDEX_TYPE,esId)
                     .setDoc(objectMapper.writeValueAsBytes(indexTemplate), XContentType.JSON).get();
@@ -305,7 +321,84 @@ public class SearchServiceImpl  implements ISearchService{
 
     @Override
     public ServiceResult<List<String>> suggest(String prefix) {
-        return null;
+        //这里的completionSuggestion里面填写的值与house_index_with_suggest里面构建的索引类型是 "type":"completion"的字段名称
+        CompletionSuggestionBuilder suggestionBuilde= SuggestBuilders.completionSuggestion("suggest")
+        .prefix(prefix).size(5);
+        SuggestBuilder suggestBuilder=new SuggestBuilder();
+        suggestBuilder.addSuggestion("autocomplete",suggestionBuilde); //前面属性的名称随便起
+
+        SearchRequestBuilder requestBuilder=this.esClient.prepareSearch(INDEX_NAME)
+                .setTypes(INDEX_TYPE)
+                .suggest(suggestBuilder);
+        log.debug(requestBuilder.toString());
+        SearchResponse response=requestBuilder.get();
+        Suggest suggest=response.getSuggest();
+        Suggest.Suggestion result=suggest.getSuggestion("autocomplete");
+        int maxSuggest=0;
+        Set<String> suggestSet=new HashSet<>();
+        for (Object term:result.getEntries()
+             ) {
+            if(term instanceof CompletionSuggestion.Entry){
+                CompletionSuggestion.Entry item= (CompletionSuggestion.Entry) term;
+                if(item.getOptions().isEmpty()){
+                    continue;
+                }
+                for (CompletionSuggestion.Entry.Option option: item.getOptions()
+                     ) {
+                    String tip=option.getText().string();
+                         if(suggestSet.contains(tip)){
+                            continue;
+                         }
+                         suggestSet.add(tip);
+                         maxSuggest++;
+                }
+            }
+            if(maxSuggest>5){
+                break;
+            }
+        }
+        List<String> suggestsLists=Lists.newArrayList(suggestSet.toArray(new String[]{}));
+        return ServiceResult.of(suggestsLists);
+    }
+
+    private boolean updateSuggest(HouseIndexTemplate indexTemplate){
+       AnalyzeRequestBuilder requestBuilder=new AnalyzeRequestBuilder(
+                this.esClient, AnalyzeAction.INSTANCE,INDEX_NAME,
+                indexTemplate.getTitle(),indexTemplate.getLayoutDesc(),
+                indexTemplate.getRoundService(),
+                indexTemplate.getDescription(),indexTemplate.getSubwayLineName(),
+                indexTemplate.getSubwayStationName()
+        );
+      /*  String [] aa=new String[]{"aa","bb","cc"};
+        AnalyzeRequestBuilder requestBuilder=new AnalyzeRequestBuilder(
+                this.esClient, AnalyzeAction.INSTANCE,indexTemplate.getTitle(),aa
+        );*/
+        requestBuilder.setAnalyzer("ik_smart");//设置分词器
+        AnalyzeResponse resposne=requestBuilder.get();//获取分词结果
+        List<AnalyzeResponse.AnalyzeToken> tokens=resposne.getTokens();
+        if(tokens == null ){
+            log.warn("can not analyze token for house:"+indexTemplate.getHouseId());
+            return false;
+        }
+
+        List<HouseSuggest> suggests=new ArrayList<>();
+        for (AnalyzeResponse.AnalyzeToken token:tokens
+             ) {
+            //排序数字类型
+            if("<NUM>".equals(token.getType()) || token.getTerm().length()<2){
+                continue;
+            }
+            HouseSuggest suggest=new HouseSuggest();
+            suggest.setInput(token.getTerm());
+            suggests.add(suggest);
+        }
+        //定制化数据(小区)自动补全
+        HouseSuggest suggest=new HouseSuggest();
+        suggest.setInput(indexTemplate.getDistrict());
+        suggests.add(suggest);
+        indexTemplate.setSuggest(suggests);
+
+        return true;
     }
 
     private void remove(Long houseId,int retry){
