@@ -384,7 +384,7 @@ public class SearchServiceImpl  implements ISearchService{
                 SearchResponse response=requestBuilder.get();
                 if(response.status()==RestStatus.OK){
                     Terms terms=response.getAggregations().get(HouseIndexKey.AGG_DISTRICT);
-                    if(terms.getBuckets()!=null && terms.getBuckets().isEmpty()){
+                    if(terms.getBuckets()!=null && !terms.getBuckets().isEmpty()){
                         return ServiceResult.of(terms.getBucketByKey(distict).getDocCount());
                     }
                 }else{
