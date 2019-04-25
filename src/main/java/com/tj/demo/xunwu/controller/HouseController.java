@@ -164,7 +164,9 @@ public class HouseController {
         model.addAttribute("agent",userDTOServiceResult.getResult());
         model.addAttribute("city",city);
         model.addAttribute("region",region);
-        model.addAttribute("houseCountInDistrict",0);
+        //同一个小区有多少房间出租，使用es聚合统计
+        ServiceResult<Long> aggResult=searchService.aggregateDistricHouse(city.getEnName(),region.getEnName(),houseDTO.getDistrict());
+        model.addAttribute("houseCountInDistrict",aggResult.getResult());
         return "house-detail";
     }
 }

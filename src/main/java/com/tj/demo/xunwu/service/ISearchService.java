@@ -35,4 +35,12 @@ public interface ISearchService {
      */
     ServiceResult<List<String>> suggest(String prefix);
 
+    /**
+     * 聚合特定小区的房间数
+     * @param cityEnName 对城市进行限定
+     * @param regionEnName 地区
+     * @param distict 小区名
+     * @return
+     */
+    ServiceResult<Long> aggregateDistricHouse(String cityEnName,String regionEnName,String distict);
 }
