@@ -293,22 +293,34 @@ public class SearchServiceImpl  implements ISearchService{
         }
 
         /**
+         * 查询优化
+         * 需要将特别重要的查询字段添加权重就可以，一般默认的权重为1.0
+         *
+         */
+        boolQueryBuilder.should(  //必要的条件
+                QueryBuilders.termQuery(HouseIndexKey.TITLE,rentSearch.getKeywords()).boost(2.0f)
+        ); //这边设置权重为2.0
+
+        /**
          * 关键词的复合查询
          */
-        boolQueryBuilder.must(QueryBuilders.multiMatchQuery(rentSearch.getKeywords(),
-                HouseIndexKey.TITLE,
+        boolQueryBuilder.should(QueryBuilders.multiMatchQuery(rentSearch.getKeywords(),
+//                HouseIndexKey.TITLE,
                 HouseIndexKey.TRAFFIC,
                 HouseIndexKey.DISTRICT,
                 HouseIndexKey.ROUND_SERVICE,
                 HouseIndexKey.SUBWAY_LINE_NAME,
                 HouseIndexKey.SUBWAY_STATION_NAME
-                ));
+        ));
 
         SearchRequestBuilder requestBuilder= this.esClient.prepareSearch(INDEX_NAME).setTypes(INDEX_TYPE)
                 .setQuery(boolQueryBuilder)
                 .addSort(HouseSort.getSortKey(rentSearch.getOrderBy()), SortOrder.fromString(rentSearch.getOrderDirection()))
                 .setFrom(rentSearch.getStart())
-                .setSize(rentSearch.getSize());
+                .setSize(rentSearch.getSize())
+//                ;
+                .setFetchSource(HouseIndexKey.HOUSE_ID,null); //只返回固定的字段(解決數據集返回過大問題)
+
         log.debug(requestBuilder.toString());
         List<Integer> houseIds=new ArrayList<>();
         SearchResponse response=requestBuilder.get();
@@ -317,6 +329,8 @@ public class SearchServiceImpl  implements ISearchService{
             return new ServiceMultResult<>(0,houseIds);
         }
         for(SearchHit hit:response.getHits()){
+//            log.debug(hit.getSourceAsString());
+            System.out.println(hit.getSourceAsString());
             houseIds.add((Integer) hit.getSourceAsMap().get(HouseIndexKey.HOUSE_ID));
         }
         return new ServiceMultResult<>(response.getHits().totalHits,houseIds);
